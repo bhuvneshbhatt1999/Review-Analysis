@@ -9,34 +9,47 @@ from io import BytesIO
 import html
 import pandas as pd
 import numpy as np
-import spacy
-from nltk.sentiment import SentimentIntensityAnalyzer
-import nltk
-import matplotlib.pyplot as plt
-from fpdf import FPDF
-import gradio as gr
 
-#####################
-# Dependency checks #
-#####################
+# === NLP Setup ===
+# Ensure resources are auto-downloaded for Streamlit Cloud
+
+import nltk
 try:
     nltk.data.find('sentiment/vader_lexicon.zip')
 except LookupError:
     nltk.download('vader_lexicon')
 
+import spacy
 try:
     nlp = spacy.load("en_core_web_sm")
 except OSError:
-    # Model not found, so download it!
-    from spacy.cli import download
-    download("en_core_web_sm")
+    import spacy.cli
+    spacy.cli.download("en_core_web_sm")
     nlp = spacy.load("en_core_web_sm")
 
+from nltk.sentiment import SentimentIntensityAnalyzer
 sia = SentimentIntensityAnalyzer()
+
+import matplotlib.pyplot as plt
+from fpdf import FPDF
+
+# These dependencies are imported only if features use them.
+try:
+    from langdetect import detect
+except ImportError:
+    detect = None
+
+try:
+    from rake_nltk import Rake
+except ImportError:
+    Rake = None
+
+########################
+# --- Text Processing helpers --- #
+########################
 
 ARTICLES = {'the', 'a', 'an'}
 DEMONSTRATORS = {'this', 'that', 'these', 'those'}
-
 
 def clean_phrase(phrase: str) -> str:
     phrase = re.sub(r'[^\w\s]', '', phrase.lower()).strip()
@@ -47,13 +60,9 @@ def clean_phrase(phrase: str) -> str:
     lemmas = [token.lemma_ for token in doc]
     return ' '.join(lemmas).strip()
 
-
 def clean_text_for_pdf(text):
-    """Safely clean text for PDF output while preserving readability."""
     if not isinstance(text, str):
         text = str(text)
-
-    # Handle common Unicode replacements
     replacements = {
         '…': '...', '—': '-', '–': '-', '−': '-', '\u2212': '-',
         '‘': "'", '’': "'", '“': '"', '”': '"',
@@ -64,12 +73,8 @@ def clean_text_for_pdf(text):
     }
     for bad, good in replacements.items():
         text = text.replace(bad, good)
-
-    # Allow printable Unicode (e.g., accented characters), not just ASCII
     text = ''.join(ch for ch in text if ch.isprintable() or ch in ['\n', '\t', '\r'])
-
     return text.strip()
-
 
 def safe_quote(q):
     q = str(q)
@@ -79,27 +84,12 @@ def safe_quote(q):
     q = re.sub(r'\s+', ' ', q)
     return q
 
+def limit_large_df(df):
+    return df  # No sampling by default; adjust if needed.
 
-def perfectly_format_numbered_reviews(text, width=85, indent=' '):
-    text = re.sub(r'\n{2,}', '\n', text)
-    numbered = re.split(r'(?m)^\s*(\d+\.)', text)
-    output = []
-    i = 1
-    while i < len(numbered):
-        num = numbered[i].strip()
-        rest = numbered[i + 1].strip()
-        lines = rest.split('\n')
-        wrapped_first = textwrap.fill(f"{num} {lines[0]}", width=width) if lines else f"{num} "
-        other_lines = [line for line in lines[1:] if line.strip()]
-        wrapped_others = [
-            textwrap.fill(line, width=width, initial_indent=indent, subsequent_indent=indent)
-            for line in other_lines
-        ]
-        combined = [wrapped_first] + wrapped_others
-        output.append('\n'.join(combined))
-        i += 2
-    return '\n'.join(output)
-
+############################
+# --- Heuristics, Column Detection --- #
+############################
 
 def auto_detect_column(df, candidates):
     lower_cols = {c.lower(): c for c in df.columns}
@@ -107,7 +97,6 @@ def auto_detect_column(df, candidates):
         if cand in lower_cols:
             return lower_cols[cand]
     return None
-
 
 def auto_detect_review_column(df):
     candidates = [
@@ -124,7 +113,6 @@ def auto_detect_review_column(df):
     lengths = df[obj_cols].apply(lambda col: col.fillna("").astype(str).map(len).mean())
     return lengths.idxmax()
 
-
 def auto_detect_nps_column(df):
     candidates = ['nps', 'nps_score', 'score', 'rating', 'net promoter score']
     for cand in candidates:
@@ -138,18 +126,9 @@ def auto_detect_nps_column(df):
             return col
     return None
 
-
-def detect_language_of_reviews(df, review_col):
-    try:
-        from langdetect import detect
-    except ImportError:
-        raise ImportError(
-            "Please install 'langdetect'; pip install langdetect"
-        )
-    sample_texts = df[review_col].dropna().astype(str).sample(min(20, len(df)), random_state=42)
-    lang_counts = Counter(detect(t) for t in sample_texts if t.strip())
-    return lang_counts.most_common(1)[0][0] if lang_counts else "unknown"
-
+###########################
+# --- File Reading --- #
+###########################
 
 def safe_read_csv(file, **kwargs):
     filename = getattr(file, 'name', file)
@@ -184,10 +163,16 @@ def safe_read_csv(file, **kwargs):
                 except Exception as e:
                     raise RuntimeError(f"Error reading CSV file: {e}")
 
+def detect_language_of_reviews(df, review_col):
+    if detect is None:
+        raise ImportError("Please install 'langdetect'; pip install langdetect")
+    sample_texts = df[review_col].dropna().astype(str).sample(min(20, len(df)), random_state=42)
+    lang_counts = Counter(detect(t) for t in sample_texts if t.strip())
+    return lang_counts.most_common(1)[0][0] if lang_counts else "unknown"
 
-def limit_large_df(df):
-    return df
-
+################################
+# --- Sentiment & Aspect Extraction --- #
+################################
 
 def aggregate_sentiment(counts):
     pos = counts.get('Positive', 0)
@@ -200,11 +185,9 @@ def aggregate_sentiment(counts):
     else:
         return 'Neutral'
 
-
 def aggregate_aspect_sentiments(occurrences):
     sentiments = [s for _, s, _ in occurrences]
     return aggregate_sentiment(Counter(sentiments))
-
 
 def extract_dynamic_aspects(review_text):
     review_text = html.unescape(review_text)
@@ -242,22 +225,19 @@ def extract_dynamic_aspects(review_text):
         })
     return data
 
-
 def analyze_review_structured(df, review_col, nps_col=None, progress_callback=None):
     if review_col not in df.columns:
         raise ValueError(f"Review column '{review_col}' not found.")
     if nps_col and nps_col not in df.columns:
         raise ValueError(f"NPS column '{nps_col}' not found.")
     if df[review_col].isnull().all():
-        raise ValueError(f"All entries in review column '{review_col}' are empty.")
-
+        raise ValueError("All entries in review column are empty.")
     records = []
     total = len(df)
     for i, row in df.iterrows():
         text = str(row[review_col]).strip()
         if not text:
             continue
-
         nps_val = row.get(nps_col) if nps_col else None
         if isinstance(nps_val, str):
             nps_val = nps_val.strip()
@@ -269,19 +249,15 @@ def analyze_review_structured(df, review_col, nps_col=None, progress_callback=No
                 nps_val = None
         except (ValueError, TypeError):
             nps_val = None
-
         aspects = extract_dynamic_aspects(text)
         for asp in aspects:
             asp["Review_ID"] = i + 1
-            asp["Review"] = text  # Ensure full text is preserved
+            asp["Review"] = text
             asp["NPS_Score"] = nps_val
             records.append(asp)
-
         if progress_callback:
             progress_callback((i + 1) / total, f"Processed {i + 1}/{total} reviews...")
-
     return pd.DataFrame(records)
-
 
 def generate_sentiment_summary(df):
     summary_rows = []
@@ -296,7 +272,6 @@ def generate_sentiment_summary(df):
         neu_pct = total and neu / total * 100 or 0
         neg_pct = total and neg / total * 100 or 0
         dominant = aggregate_sentiment(counts)
-
         avg_nps = promoters = passives = detractors = 0
         if "NPS_Score" in group.columns and group["NPS_Score"].notna().any():
             valid_nps = group["NPS_Score"].dropna()
@@ -304,14 +279,12 @@ def generate_sentiment_summary(df):
             promoters = valid_nps[(valid_nps >= 9) & (valid_nps <= 10)].count()
             passives = valid_nps[(valid_nps >= 7) & (valid_nps <= 8)].count()
             detractors = valid_nps[(valid_nps >= 0) & (valid_nps <= 6)].count()
-
         raw_quotes = []
         for quotes_cell in group["Quotes"]:
             if isinstance(quotes_cell, list):
                 raw_quotes.extend(quotes_cell)
             elif isinstance(quotes_cell, str):
                 raw_quotes.append(quotes_cell)
-
         unique_quotes = []
         seen = set()
         for q in raw_quotes:
@@ -321,7 +294,6 @@ def generate_sentiment_summary(df):
                 seen.add(q_clean)
             if len(unique_quotes) >= 3:
                 break
-
         summary_rows.append({
             "Aspect": aspect,
             "Total Mentions": total,
@@ -340,20 +312,17 @@ def generate_sentiment_summary(df):
         })
     return pd.DataFrame(summary_rows).sort_values(by="Total Mentions", ascending=False)
 
-
 def benchmark_kpis(df_summary, df_detail=None):
     total_mentions = df_summary["Total Mentions"].sum()
     pos_total = df_summary["Positive"].sum()
     neu_total = df_summary["Neutral"].sum()
     neg_total = df_summary["Negative"].sum()
-
     data = {
         "Total Mentions": f"{total_mentions:,}",
         "Positive Mentions (%)": f"{pos_total / total_mentions * 100:.2f}%" if total_mentions else "0.0%",
         "Neutral Mentions (%)": f"{neu_total / total_mentions * 100:.2f}%" if total_mentions else "0.0%",
         "Negative Mentions (%)": f"{neg_total / total_mentions * 100:.2f}%" if total_mentions else "0.0%",
     }
-
     if df_detail is not None and "NPS_Score" in df_detail.columns:
         nps_vals = df_detail["NPS_Score"].dropna()
         if not nps_vals.empty:
@@ -369,9 +338,7 @@ def benchmark_kpis(df_summary, df_detail=None):
                 "Passives": f"{passives}",
                 "Detractors": f"{detractors}",
             })
-
     return pd.DataFrame([{"KPI": k, "Value": v} for k, v in data.items()])
-
 
 def create_aspect_bar_chart(df_summary):
     fig, ax = plt.subplots(figsize=(8, 4))
@@ -394,6 +361,9 @@ def create_aspect_bar_chart(df_summary):
     buf.seek(0)
     return buf
 
+################################
+# --- PDF Reporting --- #
+################################
 
 class PDFReport(FPDF):
     def __init__(self):
@@ -401,15 +371,11 @@ class PDFReport(FPDF):
         self.first_page = True
         try:
             base = os.path.dirname(__file__)
-            fonts_path = os.path.join(base, "dejavu-fonts-ttf-2.37", "ttf")
-            if not os.path.exists(fonts_path):
-                fonts_path = os.path.join(base, "fonts")
+            fonts_path = os.path.join(base, "fonts")
             if not os.path.exists(fonts_path):
                 fonts_path = base
             self.add_font('DejaVu', '', os.path.join(fonts_path, 'DejaVuSans.ttf'), uni=True)
             self.add_font('DejaVu', 'B', os.path.join(fonts_path, 'DejaVuSans-Bold.ttf'), uni=True)
-            self.add_font('DejaVu', 'I', os.path.join(fonts_path, 'DejaVuSans-Oblique.ttf'), uni=True)
-            self.add_font('DejaVu', 'BI', os.path.join(fonts_path, 'DejaVuSans-BoldOblique.ttf'), uni=True)
             self.font_family = 'DejaVu'
         except Exception:
             self.font_family = 'Arial'
@@ -499,55 +465,47 @@ class PDFReport(FPDF):
         os.remove(image_path)
         self.ln()
 
+################################
+# --- Recommendations & Negative Reviews --- #
+################################
 
 def build_recommendations_for_aspect(aspect, neg_reviews):
-    if not neg_reviews or all(not rev.strip() for rev in neg_reviews):
+    if not Rake or not neg_reviews or all(not rev.strip() for rev in neg_reviews):
         return [f"No actionable recommendations for '{aspect}' at this time."]
     try:
-        from rake_nltk import Rake
-        rake = Rake(min_length=3, max_length=6)  # Prefer slightly longer phrases
-        # Preprocess text: remove obviously irrelevant strings like "page 3"
+        rake = Rake(min_length=3, max_length=6)
         cleaned_reviews = [re.sub(r'\bpage\s*\d+\b', '', rev, flags=re.I).strip() for rev in neg_reviews]
         combined_text = " ".join(cleaned_reviews)
         rake.extract_keywords_from_text(combined_text)
         phrases = [
-            phr for phr in rake.get_ranked_phrases() 
+            phr for phr in rake.get_ranked_phrases()
             if len(phr.strip()) > 6 and len(phr.split()) > 2 
             and not re.search(r'(kitten|page 3|\.\.|broken|s\b)', phr.lower())
         ]
     except Exception:
         phrases = []
-
     seen = set()
     key_points = []
     aspect_lower = aspect.lower()
     for phrase in phrases:
         phrase_clean = phrase.strip().capitalize()
         phrase_clean = phrase_clean.rstrip(' .,;:!?')
-
         if phrase_clean.lower() not in seen and len(phrase_clean.split()) > 2:
             seen.add(phrase_clean.lower())
             key_points.append(phrase_clean)
         if len(key_points) >= 5:
             break
-
     recommendations = []
     for point in key_points:
         point_lower = point.lower()
         if point_lower.startswith(aspect_lower):
             trimmed = point[len(aspect):].lstrip(' .,:;-–—')
-            if trimmed:
-                formatted = trimmed[0].upper() + trimmed[1:]
-            else:
-                formatted = point
+            formatted = trimmed[0].upper() + trimmed[1:] if trimmed else point
         else:
             formatted = point
-
         if not any(formatted.endswith(punct) for punct in ['.', '!', '?']):
             formatted += '.'
-
         recommendations.append(formatted)
-
     if not recommendations:
         recommendations = [f"No strong actionable recommendations found for '{aspect}'."]
     return recommendations
@@ -555,34 +513,29 @@ def build_recommendations_for_aspect(aspect, neg_reviews):
 def extract_top_negative_reviews_by_aspect(detail_df, aspects, max_reviews=5):
     def normalize(text):
         text = re.sub(r'page\s*\d+', '', text, flags=re.I)
-        text = re.sub(r'^\d+\.\s*', '', text)  # Remove numbering
+        text = re.sub(r'^\d+\.\s*', '', text)
         text = re.sub(r'\s+', ' ', text)
         return text.strip().lower()
-
     reviews = {}
     unique_reviews = detail_df[['Review_ID', 'Review']].drop_duplicates()
     overall_scores = {
         row['Review_ID']: sia.polarity_scores(row['Review'])['compound']
         for _, row in unique_reviews.iterrows()
     }
-
     for aspect in aspects:
         filtered = detail_df[
             (detail_df['Aspect'] == aspect) &
             (detail_df['Aspect_Sentiment'] == 'Negative')
         ].copy()
-
         if filtered.empty:
             reviews[aspect] = []
             continue
-
         filtered['Overall_Score'] = filtered['Review_ID'].map(overall_scores)
         filtered['Context_Score'] = filtered['Aspect_Context'].apply(
             lambda x: sia.polarity_scores(x)['compound']
         )
         filtered['Is_Overall_Negative'] = filtered['Overall_Score'] <= -0.3
         filtered = filtered.sort_values(['Is_Overall_Negative', 'Context_Score'], ascending=[False, True])
-
         deduped_texts = []
         seen_texts = set()
         for _, row in filtered.iterrows():
@@ -596,15 +549,12 @@ def extract_top_negative_reviews_by_aspect(detail_df, aspects, max_reviews=5):
             if len(deduped_texts) >= max_reviews:
                 break
         reviews[aspect] = deduped_texts
-
     return reviews
-
 
 def create_pdf_report(detail_df, summary_df):
     pdf = PDFReport()
     pdf.set_auto_page_break(auto=True, margin=16)
     pdf.add_page()
-
     uploaded_count = detail_df['Review_ID'].max() if 'Review_ID' in detail_df else 'N/A'
     analyzed_count = len(detail_df['Review_ID'].unique()) if 'Review_ID' in detail_df else 'N/A'
 
@@ -654,7 +604,6 @@ def create_pdf_report(detail_df, summary_df):
     pdf.section("RECENT NEGATIVE REVIEWS BY ASPECT")
     top_aspects = summary_df['Aspect'].head(5).tolist()
     neg_reviews = extract_top_negative_reviews_by_aspect(detail_df, top_aspects, max_reviews=5)
-
     for asp in top_aspects:
         pdf.subheading(f"{asp} - Negative Reviews")
         reviews = neg_reviews.get(asp, [])
@@ -672,174 +621,8 @@ def create_pdf_report(detail_df, summary_df):
             pdf.add_paragraph(f"{i}. {rec}", size=9)
 
     output_pdf = pdf.output(dest='S')
-    # === The key fix below for Streamlit compatibility ===
     if isinstance(output_pdf, str):
         output_pdf = output_pdf.encode('utf-8', 'replace')
     if isinstance(output_pdf, bytearray):
         output_pdf = bytes(output_pdf)
     return output_pdf
-
-
-# ========== Global State ==========
-global_detail_df = pd.DataFrame()
-global_summary_df = pd.DataFrame()
-global_top_neg_reviews = {}
-global_nps_col = None
-
-
-def run_analysis(csv_file, review_column=None, nps_column=None, progress=gr.Progress()):
-    global global_detail_df, global_summary_df, global_top_neg_reviews, global_nps_col
-
-    if csv_file is None:
-        return "Upload CSV file.", None, None, None, None
-
-    try:
-        df = safe_read_csv(csv_file)
-        if nps_column and nps_column in df.columns:
-            df[nps_column] = pd.to_numeric(df[nps_column], errors='coerce')
-
-        uploaded_count = len(df)
-        review_col = review_column if review_column and review_column in df.columns else auto_detect_review_column(df)
-        nps_col = nps_column if nps_column and nps_column in df.columns else auto_detect_nps_column(df)
-
-        if nps_col:
-            nps_msg = f"Auto-selected NPS column: **{nps_col}**."
-        else:
-            nps_msg = "NPS column not detected, skipping NPS analysis."
-
-        lang = detect_language_of_reviews(df, review_col)
-        if lang != 'en':
-            return f"Detected language: {lang}. Only English is supported.", None, None, None, None
-
-        detail_df = analyze_review_structured(df, review_col, nps_col, progress.update)
-        summary_df = generate_sentiment_summary(detail_df)
-
-        global_detail_df = detail_df
-        global_summary_df = summary_df
-        global_top_neg_reviews = extract_top_negative_reviews_by_aspect(detail_df, summary_df['Aspect'].head(5).tolist())
-
-        summary_md = summary_df.head(10).to_markdown(index=False)
-        detail_md = detail_df.head(20).to_markdown(index=False)
-        pdf_bytes = create_pdf_report(detail_df, summary_df)
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            tmp.write(pdf_bytes)
-            temp_pdf_path = tmp.name
-
-        msg = f"✅ Analysis complete. {uploaded_count} reviews uploaded, {len(detail_df['Review_ID'].unique())} analyzed."
-        if nps_msg:
-            msg += f" {nps_msg}"
-
-        return msg, summary_md, detail_md, temp_pdf_path, gr.update(visible=True)
-
-    except Exception as e:
-        import traceback
-        return f"Error: {e}\n{traceback.format_exc()}", None, None, None, gr.update(visible=False)
-
-
-def chatbot_query(message, history):
-    if global_summary_df.empty or not global_top_neg_reviews:
-        return "", history + [[message, "Please upload and analyze data first."]]
-
-    msg_lower = message.lower()
-    response = ""
-
-    if any(word in msg_lower for word in ["thank", "bye"]):
-        response = "You're welcome! Ask more questions anytime."
-
-    elif any(word in msg_lower for word in ["main negative", "top problems"]):
-        neg_aspects = global_summary_df[global_summary_df['Dominant Sentiment'] == 'Negative']
-        if neg_aspects.empty:
-            response = "No dominant negative aspects found."
-        else:
-            response = "Main negative aspects:\n"
-            for _, row in neg_aspects.head(3).iterrows():
-                avg_nps = row['Avg NPS'] if isinstance(row['Avg NPS'], (int, float)) else "N/A"
-                response += f"- **{row['Aspect']}** ({row['Total Mentions']} mentions, {row['Negative (%)']}% negative, Avg NPS: {avg_nps})\n"
-
-    elif re.search(r"(sentiment|nps) for (.+)", msg_lower):
-        match = re.search(r"(sentiment|nps) for (.+)", msg_lower)
-        aspect_name = match.group(2).strip().title()
-        row = global_summary_df[global_summary_df['Aspect'].str.lower() == aspect_name.lower()]
-        if row.empty:
-            row = global_summary_df[global_summary_df['Aspect'].str.contains(aspect_name, case=False)]
-        if row.empty:
-            response = f"No data for aspect '{aspect_name}'."
-        else:
-            row = row.iloc[0]
-            avg_nps = row['Avg NPS'] if isinstance(row['Avg NPS'], (int, float)) else "N/A"
-            response = (
-                f"For **{row['Aspect']}**:\n"
-                f"- Positive: {row['Positive (%)']}%\n"
-                f"- Neutral: {row['Neutral (%)']}%\n"
-                f"- Negative: {row['Negative (%)']}%\n"
-                f"- Dominant: **{row['Dominant Sentiment']}**\n"
-                f"- Avg NPS: **{avg_nps}**"
-            )
-
-    elif re.search(r"(recommendations?|suggestions?) for (.+)", msg_lower):
-        match = re.search(r"(recommendations?|suggestions?) for (.+)", msg_lower)
-        aspect_name = match.group(2).strip().title()
-        rows = global_summary_df[global_summary_df['Aspect'].str.lower() == aspect_name.lower()]
-        if rows.empty:
-            rows = global_summary_df[global_summary_df['Aspect'].str.contains(aspect_name, case=False)]
-        if rows.empty:
-            response = f"No data for '{aspect_name}'."
-        else:
-            actual = rows.iloc[0]['Aspect']
-            reviews = global_top_neg_reviews.get(actual, [])
-            if not reviews:
-                response = f"No negative reviews for '{actual}' to generate recommendations."
-            else:
-                recs = build_recommendations_for_aspect(actual, reviews)
-                response = f"Recommendations for '{actual}':\n" + "\n".join(f"{i}. {r}" for i, r in enumerate(recs, 1))
-
-    else:
-        response = (
-            "Try asking:\n"
-            "- What are the main negative aspects?\n"
-            "- Sentiment for Food\n"
-            "- Recommendations for Service"
-        )
-
-    history.append([message, response])
-    return "", history
-
-
-# ==== Gradio UI ====
-with gr.Blocks() as demo:
-    gr.Markdown("# Customer Reviews and NPS Sentiment Analysis")
-    gr.Markdown("Upload your CSV/Excel file to analyze customer feedback and generate insights.")
-
-    with gr.Row():
-        with gr.Column(scale=1):
-            csv_input = gr.File(label="Upload File (.csv or .xlsx)")
-            review_input = gr.Textbox(label="Review Column (Optional)", placeholder="Leave blank to auto-detect")
-            nps_input = gr.Textbox(label="NPS Column (Optional)", placeholder="e.g., nps_score")
-            analyze_btn = gr.Button("🚀 Analyze Reviews")
-            status_text = gr.Markdown("📊 Upload a file to begin.")
-            pdf_output_file = gr.File(label="📥 Download Full PDF Report", visible=False)
-
-        with gr.Column(scale=2):
-            chatbot = gr.Chatbot(label="Ask Insights", height=400)
-            chatbox = gr.Textbox(label="Ask a question:", placeholder="E.g., 'What are the main negative aspects?'")
-            clear_btn = gr.Button("🗑️ Clear Chat")
-
-    gr.Markdown("---")
-    gr.Markdown("## Results")
-    with gr.Tabs():
-        with gr.TabItem("Summary (Top 10)"):
-            summary_output = gr.Markdown("Summary will appear here.")
-        with gr.TabItem("Raw Mentions (First 20)"):
-            detail_output = gr.Markdown("Detailed data will appear here.")
-
-    analyze_btn.click(
-        fn=run_analysis,
-        inputs=[csv_input, review_input, nps_input],
-        outputs=[status_text, summary_output, detail_output, pdf_output_file, pdf_output_file]
-    )
-    chatbox.submit(fn=chatbot_query, inputs=[chatbox, chatbot], outputs=[chatbox, chatbot])
-    clear_btn.click(lambda: [], None, chatbot)
-
-if __name__ == "__main__":
-    demo.launch()
