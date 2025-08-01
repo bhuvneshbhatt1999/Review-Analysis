@@ -1,0 +1,11 @@
+streamlit==1.47.1
+transformers==4.49.0
+torch==2.7.1
+pandas==2.3.1
+openpyxl==3.1.5
+scikit-learn==1.7.1
+spacy==3.8.7
+matplotlib==3.10.3
+seaborn==0.13.2
+plotly==5.23.0 # Latest plotly.py is 5.23.0 as per their docs
+nltk==3.9.1
