@@ -29,10 +29,16 @@ def spacy_safe_load(model_name="en_core_web_sm"):
     try:
         return spacy.load(model_name)
     except OSError:
-        import subprocess
-        subprocess.run(["python", "-m", "spacy", "download", model_name, "--user"], check=True)
-        return spacy.load(model_name)
-
+        try:
+            import spacy.cli
+            spacy.cli.download(model_name)
+            return spacy.load(model_name)
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not download spaCy model '{model_name}'. "
+                "Check that your spaCy version and Python version are compatible. "
+                f"Original error: {e}"
+            )
 nlp = spacy_safe_load()
 
 from nltk.sentiment import SentimentIntensityAnalyzer
