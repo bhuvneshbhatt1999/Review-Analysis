@@ -32,7 +32,6 @@ def spacy_safe_load(model_name="en_core_web_sm"):
         return spacy.load(model_name)
     except OSError:
         try:
-            import spacy.cli
             spacy.cli.download(model_name)
             return spacy.load(model_name)
         except Exception as e:
