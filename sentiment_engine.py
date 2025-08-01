@@ -12,6 +12,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from fpdf import FPDF
 import nltk
+import spacy
+import spacy.cli
+
 
 ########################
 # Dependency checks    #
@@ -24,7 +27,6 @@ except LookupError:
     nltk.download('vader_lexicon')
 
 # Ensure spaCy and model is loaded in user-writable directory (for Streamlit Cloud)
-import spacy
 def spacy_safe_load(model_name="en_core_web_sm"):
     try:
         return spacy.load(model_name)
