@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from io import BytesIO
 from collections import Counter
 
-# Try import wordcloud, or skip feature if not available
+# Optional: wordcloud support
 try:
     from wordcloud import WordCloud, STOPWORDS
     _wordcloud_available = True
@@ -27,8 +27,7 @@ from sentiment_engine import (
     limit_large_df
 )
 
-# Constants
-TOP_N_ASPECTS = 10  # For summary charts and negative review extraction
+TOP_N_ASPECTS = 10
 
 st.set_page_config(layout="wide", page_title="Sentiment Insight BI Dashboard", page_icon="📊")
 
@@ -49,7 +48,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- SIDEBAR ---
 with st.sidebar:
     st.markdown("""
     <div style='padding:1.17em .7em 0.9em .7em;background: linear-gradient(90deg,#e0f7fd 15%, #bdeaff 85%);
@@ -82,7 +80,6 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-# --- FILE UPLOAD & DATA LOADING ---
 uploaded_file = st.file_uploader("📂 Upload CSV or Excel file with reviews & NPS", type=["csv", "xlsx"])
 df = None
 df_error = None
@@ -96,38 +93,33 @@ if uploaded_file:
     if "current_file_name" not in st.session_state or uploaded_file.name != st.session_state["current_file_name"]:
         clear_analysis_state()
         st.session_state["current_file_name"] = uploaded_file.name
-
     with st.spinner("Loading file..."):
         try:
             if uploaded_file.name.lower().endswith(".csv"):
                 df = safe_read_csv(uploaded_file)
             else:
                 df = pd.read_excel(uploaded_file)
-            df = limit_large_df(df)  # <- No sampling, always returns full df
+            df = limit_large_df(df)
             if len(df) > 20000:
                 st.warning("Large file detected: Processing may take longer for datasets over 20,000 reviews.")
         except Exception as e:
             df_error = f"Could not read uploaded file: {e}"
-
     if df is not None:
         try:
             auto_col = auto_detect_review_column(df)
         except Exception as e:
             auto_col = df.columns[0] if len(df.columns) > 0 else ""
             st.error(f"Could not auto-detect review column: {e}")
-
         try:
             auto_nps_col = auto_detect_nps_column(df)
         except Exception as e:
             auto_nps_col = ""
-
         review_col_selection = st.selectbox(
             "✨ Select review column",
             df.columns,
             index=list(df.columns).index(auto_col) if auto_col in df.columns else 0,
             help="Choose the column containing user opinions"
         )
-
         nps_col_selection = st.selectbox(
             "💠 Select NPS score column (0-10 scale, optional)",
             ["<AUTO-DETECT>"] + list(df.columns),
@@ -136,21 +128,16 @@ if uploaded_file:
         )
         if nps_col_selection == "<AUTO-DETECT>":
             nps_col_selection = auto_nps_col
-
     elif df_error:
         st.error(df_error)
 
-# --- MAIN ANALYSIS TRIGGER & UI ---
 def analyze_reviews(df: pd.DataFrame, review_col: str, nps_col: str):
     progress_area = st.empty()
-
     def streamlit_progress_callback(progress, msg):
         progress_area.text(msg)
-
     lang = detect_language_of_reviews(df, review_col)
     if lang != "en":
         st.warning(f"Detected language: {lang}. Only English is supported; results may not be accurate.")
-
     with st.spinner("Analyzing reviews..."):
         start_time = time.time()
         df_out = analyze_review_structured(df, review_col=review_col, nps_col=nps_col or None, progress_callback=streamlit_progress_callback)
@@ -160,7 +147,6 @@ def analyze_reviews(df: pd.DataFrame, review_col: str, nps_col: str):
         pdf_bytes = create_pdf_report(df_out, summary_df)
         st.success(f"🏃‍♂️ Analysis completed in {time.time() - start_time:.1f} seconds.")
         progress_area.empty()
-
     return df_out, summary_df, top_neg_reviews, pdf_bytes
 
 if uploaded_file and df is not None:
@@ -171,7 +157,7 @@ if uploaded_file and df is not None:
             st.session_state["absa_summary"] = summary_df
             st.session_state["top_neg_reviews_by_aspect"] = top_neg_reviews_by_aspect
             st.session_state["pdf_bytes"] = pdf_bytes
-            st.session_state["chat_suggestions"] = None  # Reset suggestions
+            st.session_state["chat_suggestions"] = None
             st.session_state["messages"] = None
         except Exception as e:
             st.error(f"An error occurred during analysis: {e}")
@@ -181,7 +167,6 @@ if uploaded_file and df is not None:
         summary_df = st.session_state["absa_summary"]
         top_neg_reviews_by_aspect = st.session_state.get("top_neg_reviews_by_aspect", {})
 
-        # ----- ANALYTICS & VISUALS -----
         def show_eda_metrics(df, summary_df, review_col_selection):
             st.markdown("<h3>🔍 Data Summary & Review Analytics</h3>", unsafe_allow_html=True)
             colA, colB, colC, colD, colE = st.columns(5)
@@ -192,9 +177,8 @@ if uploaded_file and df is not None:
             colB.metric("Avg. Length (chars)", f"{avg_length:,}")
             colC.metric("Total Aspects Found", f"{summary_df['Aspect'].nunique()}")
             colD.metric("Top Aspect", summary_df.iloc[0]['Aspect'] if not summary_df.empty else "-")
-            # Show avg NPS per aspect if present
-            if "Avg NPS Score" in summary_df.columns:
-                non_na = summary_df["Avg NPS Score"].replace("N/A", pd.NA).dropna()
+            if "Avg NPS" in summary_df.columns:
+                non_na = summary_df["Avg NPS"].replace("N/A", pd.NA).dropna()
                 try:
                     colE.metric("Avg NPS per Aspect", f"{pd.to_numeric(non_na, errors='coerce').mean():.2f}" if not non_na.empty else "N/A")
                 except Exception:
@@ -376,7 +360,6 @@ if uploaded_file and df is not None:
 
         def chatbot_response(user_input: str, summary_df: pd.DataFrame, top_neg_reviews_by_aspect: dict) -> str:
             user_lower = user_input.lower()
-
             if "main negative aspects" in user_lower or "top problems" in user_lower:
                 negative_aspects = summary_df[summary_df['Dominant Sentiment'] == 'Negative'].head(3)
                 if not negative_aspects.empty:
@@ -386,15 +369,12 @@ if uploaded_file and df is not None:
                     return resp
                 else:
                     return "Good news! No dominant negative aspects found."
-
             elif "sentiment for" in user_lower or "nps for" in user_lower:
                 match = re.search(r"(?:sentiment|nps) for (.+)", user_lower)
                 if match:
                     aspect_name = match.group(1).strip().title()
-                    # Try exact match first
                     filtered = summary_df[summary_df['Aspect'].str.lower() == aspect_name.lower()]
                     if filtered.empty:
-                        # Fallback: partial match
                         filtered = summary_df[summary_df['Aspect'].str.contains(aspect_name, case=False, na=False)]
                     if filtered.empty:
                         return f"Sorry, no data found for aspect '{aspect_name}'."
@@ -413,24 +393,19 @@ if uploaded_file and df is not None:
                     )
                 else:
                     return "Please specify an aspect. Example: *Sentiment for Delivery*"
-
             elif "recommendations for" in user_lower or "suggestions for" in user_lower:
                 aspect_match = re.search(r"(?:recommendations|suggestions) for (.+)", user_lower)
                 if aspect_match:
                     aspect_name = aspect_match.group(1).strip().title()
-                    # Try exact match
                     neg_reviews_list = top_neg_reviews_by_aspect.get(aspect_name, [])
                     if not neg_reviews_list:
-                        # Fallback: partial match
                         matched_aspect = next(
                             (a for a in top_neg_reviews_by_aspect.keys() if aspect_name.lower() in a.lower()),
                             None
                         )
                         if matched_aspect:
                             neg_reviews_list = top_neg_reviews_by_aspect.get(matched_aspect, [])
-
                     if neg_reviews_list:
-                        # Clean reviews: remove any old-style prefixes
                         clean_reviews = [
                             re.sub(r"^\(.*?\)\s*", "", rev).strip()
                             for rev in neg_reviews_list
@@ -450,10 +425,8 @@ if uploaded_file and df is not None:
                         return f"No negative mentions found for **'{aspect_name}'** in the reviews."
                 else:
                     return "Please specify an aspect. Example: *Recommendations for Delivery*"
-
             elif "thank you" in user_lower or "bye" in user_lower:
                 return "You're welcome! Feel free to ask more questions or explore your customer reviews anytime. 😊"
-
             else:
                 return ("Try one of these: " +
                         " | ".join([f"`{s}`" for s in st.session_state['chat_suggestions']]) +
