@@ -9,47 +9,39 @@ from io import BytesIO
 import html
 import pandas as pd
 import numpy as np
-
-# === NLP Setup ===
-# Ensure resources are auto-downloaded for Streamlit Cloud
-
+import matplotlib.pyplot as plt
+from fpdf import FPDF
 import nltk
+
+########################
+# Dependency checks    #
+########################
+
+# Ensure NLTK resource is present
 try:
     nltk.data.find('sentiment/vader_lexicon.zip')
 except LookupError:
     nltk.download('vader_lexicon')
 
+# Ensure spaCy and model is loaded in user-writable directory (for Streamlit Cloud)
 import spacy
-try:
-    nlp = spacy.load("en_core_web_sm")
-except OSError:
-    import spacy.cli
-    spacy.cli.download("en_core_web_sm")
-    nlp = spacy.load("en_core_web_sm")
+def spacy_safe_load(model_name="en_core_web_sm"):
+    try:
+        return spacy.load(model_name)
+    except OSError:
+        import subprocess
+        subprocess.run(["python", "-m", "spacy", "download", model_name, "--user"], check=True)
+        return spacy.load(model_name)
+
+nlp = spacy_safe_load()
 
 from nltk.sentiment import SentimentIntensityAnalyzer
 sia = SentimentIntensityAnalyzer()
 
-import matplotlib.pyplot as plt
-from fpdf import FPDF
-
-# These dependencies are imported only if features use them.
-try:
-    from langdetect import detect
-except ImportError:
-    detect = None
-
-try:
-    from rake_nltk import Rake
-except ImportError:
-    Rake = None
-
-########################
-# --- Text Processing helpers --- #
-########################
-
 ARTICLES = {'the', 'a', 'an'}
 DEMONSTRATORS = {'this', 'that', 'these', 'those'}
+
+# --------- Text Cleaning and Utilities ----------
 
 def clean_phrase(phrase: str) -> str:
     phrase = re.sub(r'[^\w\s]', '', phrase.lower()).strip()
@@ -85,11 +77,9 @@ def safe_quote(q):
     return q
 
 def limit_large_df(df):
-    return df  # No sampling by default; adjust if needed.
+    return df  # For future: sample for very large files.
 
-############################
-# --- Heuristics, Column Detection --- #
-############################
+# ------------- Column Detect Heuristics ----------------
 
 def auto_detect_column(df, candidates):
     lower_cols = {c.lower(): c for c in df.columns}
@@ -126,9 +116,7 @@ def auto_detect_nps_column(df):
             return col
     return None
 
-###########################
-# --- File Reading --- #
-###########################
+# -------------- File Reading Helpers -----------------
 
 def safe_read_csv(file, **kwargs):
     filename = getattr(file, 'name', file)
@@ -163,16 +151,18 @@ def safe_read_csv(file, **kwargs):
                 except Exception as e:
                     raise RuntimeError(f"Error reading CSV file: {e}")
 
+# -------------- Language Detection -------------------
+
 def detect_language_of_reviews(df, review_col):
-    if detect is None:
+    try:
+        from langdetect import detect
+    except ImportError:
         raise ImportError("Please install 'langdetect'; pip install langdetect")
     sample_texts = df[review_col].dropna().astype(str).sample(min(20, len(df)), random_state=42)
     lang_counts = Counter(detect(t) for t in sample_texts if t.strip())
     return lang_counts.most_common(1)[0][0] if lang_counts else "unknown"
 
-################################
-# --- Sentiment & Aspect Extraction --- #
-################################
+# -------------- Sentiment and Aspect Extraction --------------
 
 def aggregate_sentiment(counts):
     pos = counts.get('Positive', 0)
@@ -361,10 +351,7 @@ def create_aspect_bar_chart(df_summary):
     buf.seek(0)
     return buf
 
-################################
-# --- PDF Reporting --- #
-################################
-
+# -------- PDF Reporting Class --------
 class PDFReport(FPDF):
     def __init__(self):
         super().__init__()
@@ -379,34 +366,29 @@ class PDFReport(FPDF):
             self.font_family = 'DejaVu'
         except Exception:
             self.font_family = 'Arial'
-
     def header(self):
         if self.page_no() == 1:
             self.set_font(self.font_family, 'B', 16)
             self.set_text_color(45, 65, 155)
             self.cell(0, 10, "CUSTOMER REVIEW SENTIMENT ANALYSIS", 0, 1, 'C')
             self.ln(4)
-
     def footer(self):
         self.set_y(-15)
         self.set_font(self.font_family, 'I', 8)
         self.set_text_color(120, 120, 120)
         self.cell(0, 10, f"Page {self.page_no()}", 0, 0, 'C')
-
     def section(self, title, size=14, after_space=1):
         self.set_font(self.font_family, 'B', size)
         self.set_text_color(15, 45, 90)
         self.cell(0, self.font_size_pt + 4, clean_text_for_pdf(title.upper()), 0, 1, 'L')
         self.set_text_color(0, 0, 0)
         self.ln(after_space)
-
     def subheading(self, text, size=12, after_space=1):
         self.set_font(self.font_family, 'B', size)
         self.set_text_color(40, 40, 120)
         self.cell(0, self.font_size_pt + 3, clean_text_for_pdf(text), 0, 1, 'L')
         self.set_text_color(0, 0, 0)
         self.ln(after_space)
-
     def add_paragraph(self, text, size=11, line_height=5, after_space=1):
         self.set_font(self.font_family, '', size)
         cleaned = clean_text_for_pdf(text)
@@ -414,7 +396,6 @@ class PDFReport(FPDF):
             cleaned = "[Empty or invalid text]"
         self.multi_cell(0, line_height, cleaned)
         self.ln(after_space)
-
     def add_table(self, df, title=None, fontsize=9, col_title_fontsize=9, truncate_columns=None):
         if title:
             self.set_font(self.font_family, 'B', fontsize + 2)
@@ -423,7 +404,6 @@ class PDFReport(FPDF):
         available_width = self.epw - (num_cols + 1) * self.c_margin
         col_widths = [available_width / num_cols] * num_cols
         row_height = 6
-
         self.set_font(self.font_family, 'B', col_title_fontsize)
         for i, col in enumerate(df.columns):
             colname = col
@@ -431,7 +411,6 @@ class PDFReport(FPDF):
                 colname = (str(col)[:20] + "...") if len(str(col)) > 20 else str(col)
             self.cell(col_widths[i], row_height, clean_text_for_pdf(colname), border=1, align='C')
         self.ln(row_height)
-
         self.set_font(self.font_family, '', fontsize)
         for _, row in df.iterrows():
             if self.get_y() + row_height > self.h - self.b_margin:
@@ -444,7 +423,6 @@ class PDFReport(FPDF):
                     self.cell(col_widths[i], row_height, clean_text_for_pdf(colname), border=1, align='C')
                 self.ln(row_height)
                 self.set_font(self.font_family, '', fontsize)
-
             for i, col in enumerate(df.columns):
                 val = row[col]
                 val_str = str(val)
@@ -452,7 +430,6 @@ class PDFReport(FPDF):
                     val_str = val_str[:40] + "..."
                 self.cell(col_widths[i], row_height, clean_text_for_pdf(val_str), border=1)
             self.ln(row_height)
-
     def add_image(self, buf, width=None, caption=None, caption_center=True):
         if caption:
             self.set_font(self.font_family, 'I', 10)
@@ -465,12 +442,12 @@ class PDFReport(FPDF):
         os.remove(image_path)
         self.ln()
 
-################################
-# --- Recommendations & Negative Reviews --- #
-################################
-
 def build_recommendations_for_aspect(aspect, neg_reviews):
-    if not Rake or not neg_reviews or all(not rev.strip() for rev in neg_reviews):
+    try:
+        from rake_nltk import Rake
+    except ImportError:
+        return [f"No actionable recommendations for '{aspect}' (rake-nltk not installed)."]
+    if not neg_reviews or all(not rev.strip() for rev in neg_reviews):
         return [f"No actionable recommendations for '{aspect}' at this time."]
     try:
         rake = Rake(min_length=3, max_length=6)
@@ -488,8 +465,7 @@ def build_recommendations_for_aspect(aspect, neg_reviews):
     key_points = []
     aspect_lower = aspect.lower()
     for phrase in phrases:
-        phrase_clean = phrase.strip().capitalize()
-        phrase_clean = phrase_clean.rstrip(' .,;:!?')
+        phrase_clean = phrase.strip().capitalize().rstrip(' .,;:!?')
         if phrase_clean.lower() not in seen and len(phrase_clean.split()) > 2:
             seen.add(phrase_clean.lower())
             key_points.append(phrase_clean)
@@ -557,7 +533,6 @@ def create_pdf_report(detail_df, summary_df):
     pdf.add_page()
     uploaded_count = detail_df['Review_ID'].max() if 'Review_ID' in detail_df else 'N/A'
     analyzed_count = len(detail_df['Review_ID'].unique()) if 'Review_ID' in detail_df else 'N/A'
-
     pdf.section("EXECUTIVE SUMMARY & KEY INSIGHTS")
     if summary_df.empty:
         pdf.add_paragraph("No data to summarize.")
@@ -568,14 +543,11 @@ def create_pdf_report(detail_df, summary_df):
             f"{len(summary_df)} unique aspects found. "
             f"Top mentioned aspect: {top['Aspect']} ({top['Total Mentions']} mentions)."
         )
-
     pdf.section("KEY METRICS & KPI OVERVIEW")
     kpi_df = benchmark_kpis(summary_df, detail_df)
     pdf.add_table(kpi_df, title="Sentiment & NPS Score KPIs")
-
     pdf.section("SENTIMENT DISTRIBUTION BY TOP ASPECTS")
     pdf.add_image(create_aspect_bar_chart(summary_df))
-
     pdf.section("DETAILED METRICS")
     cols = [
         "Aspect", "Total Mentions", "Positive", "Neutral", "Negative",
@@ -600,7 +572,6 @@ def create_pdf_report(detail_df, summary_df):
     subset_df = summary_df[cols].copy()
     subset_df.rename(columns=rename_columns, inplace=True)
     pdf.add_table(subset_df.head(10), fontsize=8, col_title_fontsize=8)
-
     pdf.section("RECENT NEGATIVE REVIEWS BY ASPECT")
     top_aspects = summary_df['Aspect'].head(5).tolist()
     neg_reviews = extract_top_negative_reviews_by_aspect(detail_df, top_aspects, max_reviews=5)
@@ -612,14 +583,12 @@ def create_pdf_report(detail_df, summary_df):
             continue
         for i, rev in enumerate(reviews, 1):
             pdf.add_paragraph(f"{i}. {safe_quote(rev)}", size=9)
-
     pdf.section("ACTIONABLE RECOMMENDATIONS")
     for asp in top_aspects:
         pdf.subheading(f"{asp} - Recommendations")
         recs = build_recommendations_for_aspect(asp, neg_reviews.get(asp, []))
         for i, rec in enumerate(recs, 1):
             pdf.add_paragraph(f"{i}. {rec}", size=9)
-
     output_pdf = pdf.output(dest='S')
     if isinstance(output_pdf, str):
         output_pdf = output_pdf.encode('utf-8', 'replace')
